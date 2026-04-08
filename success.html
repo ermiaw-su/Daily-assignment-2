@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Success</title>
+</head>
+<body>
+
+<h1>DAILY ASSIGNMENT</h1>
+
+<script>
+async function checkAuth() {
+  const token = localStorage.getItem("token")
+
+  if (!token) {
+    window.location.href = "login.html"
+    return
+  }
+
+  const res = await fetch("http://localhost:8080/success", {
+    headers: {
+      "Authorization": "Bearer " + token
+    }
+  })
+
+  if (!res.ok) {
+    alert("Token invalid!")
+    window.location.href = "login.html"
+  }
+}
+
+checkAuth()
+</script>
+
+</body>
+</html>

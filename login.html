@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Login</title>
+</head>
+<body>
+
+<h2>Login</h2>
+
+//Form
+<input id="username" placeholder="Username"><br><br>
+<input id="password" type="password" placeholder="Password"><br><br>
+ 
+<button onclick="login()">Login</button>
+
+<p>Belum punya akun? <a href="register.html">Register</a></p>
+
+<script>
+async function login() {
+  try {
+    const res = await fetch("http://localhost:8080/login", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        username: document.getElementById("username").value,
+        password: document.getElementById("password").value
+      })
+    })
+
+    const text = await res.text()
+
+    try {
+      const data = JSON.parse(text)
+
+      if (data.token) {
+        localStorage.setItem("token", data.token)
+        alert("Login berhasil!")
+        window.location.href = "success.html"
+      } else {
+        alert(text)
+      }
+
+    } catch {
+      alert(text)
+    }
+
+  } catch (err) {
+    alert("Server error / tidak connect")
+    console.error(err)
+  }
+}
+</script>
+
+</body>
+</html>
