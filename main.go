@@ -34,6 +34,16 @@ type User struct {
 	Password string `json:"password"`
 }
 
+type Event struct {
+	ID          int    `json:"id"`
+	Name        string `json:"name"`
+	Quota       int    `json:"quota"`
+}
+
+type Booking struct {
+	EventID int `json:"event_id"`
+}
+
 // Authentication Handlers
 
 func registerHandler(w http.ResponseWriter, r *http.Request) {
@@ -137,6 +147,120 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func eventsHandler(w http.ResponseWriter. r *http.Request) {
+	enableCORS(&w)
+
+	if r.Method != http.MethodGet {
+		http.Error(w, "Invalid Method!", http.StatusMethodNotAllowed)
+		return
+	}
+
+	rows, err := db.Query("SELECT id, name, quota FROM events")
+
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+
+	// Close the rows
+	defer rows.Close()
+	
+	var events []Event
+
+	from rows.Next() {
+		var e Event
+		row.Scan(&e.ID, &e.Name, &e.Quota)
+		events = append(events, e)
+	}
+
+	json.NewEncoder(w).Encode(events)
+}
+
+func bookingHandler (w http.ResponseWriter, r *http.Request) {
+	enableCORS(&w)
+
+	if r.Method != http.MethodPost {
+		http.Error(w, "Invalid Method!", http.StatusMethodNotAllowed)
+		return
+	}
+
+	username := r.Header.Get("username")
+
+	var booking Booking
+	err := json.NewDecoder(r.Body).Decode(&booking)
+	if err := nil {
+		http.Error(w, "Invalid JSON!", http.StatusBadRequest)
+		return
+	}
+
+	// Check duplicate booking
+	var exists int
+	err = db.QueryRow("SELECT COUNT(*) FROM bookings WHERE username = ? AND event_id = ?", username, booking.EventID).Scan(&exists)
+
+	if exists > 0 {
+		http.Error(w, "Duplicate booking", http.StatusBadRequest)
+		return
+	}
+
+	// Check quota
+	var quota int
+	err = db.QueryRow("SELECT quota FROM events WHERE id = ?", booking.EventID).Scan(&quota)
+
+	if err != nil {
+		http.Error(w, "Event not found", http.StatusBadRequest)
+		return
+	}
+
+	var booked int
+	err = db.QueryRow("SELECT COUNT(*) FROM bookings WHERE event_id = ?", booking.EventID).Scan(&booked)
+
+	if err != nil {
+		http.Error(w, "Quota Full", http.StatusBadRequest)
+		return
+	}
+
+	// Insert booking
+	_, err = db.Exec("INSERT INTO bookings (username, event_id) VALUES (?, ?)", username, booking.EventID)
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]string{
+		"message": "Booking successful",
+	})
+}
+
+func historyHandler(w http.ResponseWriter, r *http.Request) {
+	enableCORS(&w)
+
+	if r.Method != http.MethodGet {
+		http.Error(w, "Invalid Method!", http.StatusMethodNotAllowed)
+		return
+	}
+
+	username := r.Header.Get("username")
+
+	rows, err := db.Query(`SELECT e.id, e.name FROM bookings b JOIN events e ON b.event_id = e.id WHERE b.username = ?`, username)
+
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+
+	// Close the rows
+	defer rows.Close()
+	
+	var events []Event
+
+	from rows.Next() {
+		var e Event
+		row.Scan(&e.ID, &e.Name)
+		events = append(events, e)
+	}
+
+	json.NewEncoder(w).Encode(events)
+}
 
 // Success Handler
 func successHandler(w http.ResponseWriter, r *http.Request) {
@@ -170,7 +294,8 @@ func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 
 		tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
 
-		token, err := jwt.Parse(tokenStr, func(token *jwt.Token) (interface{}, error) {
+		claims := jwt.MapClaims{}
+		token, err := jwt.ParseWithClaims(tokenStr, claims, func(token *jwt.Token) (interface{}, error) {
 			return jwtKey, nil
 		})
 
@@ -178,6 +303,9 @@ func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "Invalid token", http.StatusUnauthorized)
 			return
 		}
+
+		// Store username in header
+		r.Header.Set("username", claims["username"].(string))
 
 		next(w, r)
 	}
@@ -210,6 +338,9 @@ func main() {
 	http.HandleFunc("/register", registerHandler)
 	http.HandleFunc("/login", loginHandler)
 	http.HandleFunc("/success", authMiddleware(successHandler))
+	http.HandleFunc("/events", eventsHandler)
+	http.HandleFunc("/booking", authMiddleware(bookingHandler))
+	http.HandleFunc("/history", authMiddleware(historyHandler))
 
 	fmt.Println("Server running on :8080")
 	http.ListenAndServe(":8080", nil)
