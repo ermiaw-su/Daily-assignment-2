@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
@@ -18,6 +19,10 @@ var db *sql.DB
 
 // secret key
 var jwtKey = []byte("secret_key")
+
+// mutex
+var bookingMutex sync.Mutex
+var rateLimiterMutex sync.Mutex
 
 // Model
 
@@ -42,6 +47,41 @@ type Event struct {
 
 type Booking struct {
 	EventID int `json:"event_id"`
+}
+
+// WORKER POOL
+type Job struct {
+	Username string
+	EventID int
+}
+
+var jobQueue = make(chan Job, 100)
+
+func worker(id int) {
+	for job := range jobQueue {
+		log.Printf("Worker %d processing booking: user=%s event=%d\n", id, job.Username, job.EventID)
+	}
+}
+
+// Rate Limiter
+var rateLimiter = make(map[string]int)
+
+func rateLimitMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ip := strings.Split(r.RemoteAddr, ":")[0]
+
+		rateLimiterMutex.Lock()
+		rateLimiter[ip]++
+		count := rateLimiter[ip]
+		rateLimiterMutex.Unlock()
+
+		if rateLimiter[ip] > 5 {
+			http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
+			return
+		}
+
+		next(w, r)
+	}
 }
 
 // Authentication Handlers
@@ -147,7 +187,7 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func eventsHandler(w http.ResponseWriter. r *http.Request) {
+func eventsHandler(w http.ResponseWriter, r *http.Request) {
 	enableCORS(&w)
 
 	if r.Method != http.MethodGet {
@@ -167,9 +207,9 @@ func eventsHandler(w http.ResponseWriter. r *http.Request) {
 	
 	var events []Event
 
-	from rows.Next() {
+	for rows.Next() {
 		var e Event
-		row.Scan(&e.ID, &e.Name, &e.Quota)
+		rows.Scan(&e.ID, &e.Name, &e.Quota)
 		events = append(events, e)
 	}
 
@@ -188,8 +228,16 @@ func bookingHandler (w http.ResponseWriter, r *http.Request) {
 
 	var booking Booking
 	err := json.NewDecoder(r.Body).Decode(&booking)
-	if err := nil {
+	if err != nil {
 		http.Error(w, "Invalid JSON!", http.StatusBadRequest)
+		return
+	}
+
+	bookingMutex.Lock()
+	defer bookingMutex.Unlock()
+
+	if booking.EventID == 0 {
+		http.Error(w, "Event ID required", http.StatusBadRequest)
 		return
 	}
 
@@ -214,7 +262,7 @@ func bookingHandler (w http.ResponseWriter, r *http.Request) {
 	var booked int
 	err = db.QueryRow("SELECT COUNT(*) FROM bookings WHERE event_id = ?", booking.EventID).Scan(&booked)
 
-	if err != nil {
+	if booked >= quota {
 		http.Error(w, "Quota Full", http.StatusBadRequest)
 		return
 	}
@@ -225,6 +273,8 @@ func bookingHandler (w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
+
+	jobQueue <- Job{Username: username, EventID: booking.EventID}
 
 	json.NewEncoder(w).Encode(map[string]string{
 		"message": "Booking successful",
@@ -253,9 +303,9 @@ func historyHandler(w http.ResponseWriter, r *http.Request) {
 	
 	var events []Event
 
-	from rows.Next() {
+	for rows.Next() {
 		var e Event
-		row.Scan(&e.ID, &e.Name)
+		rows.Scan(&e.ID, &e.Name)
 		events = append(events, e)
 	}
 
@@ -319,6 +369,10 @@ func enableCORS(w *http.ResponseWriter) {
 
 func main() {
 
+	for i := 1; i <= 3; i++ {
+		go worker(i)
+	}
+
 	var err error
 
 	dsn := "root:@tcp(127.0.0.1:3306)/midterm"
@@ -336,10 +390,10 @@ func main() {
 	fmt.Println("Database connected!")
 
 	http.HandleFunc("/register", registerHandler)
-	http.HandleFunc("/login", loginHandler)
+	http.HandleFunc("/login", rateLimitMiddleware(loginHandler))
 	http.HandleFunc("/success", authMiddleware(successHandler))
 	http.HandleFunc("/events", eventsHandler)
-	http.HandleFunc("/booking", authMiddleware(bookingHandler))
+	http.HandleFunc("/booking", rateLimitMiddleware(authMiddleware(bookingHandler)))
 	http.HandleFunc("/history", authMiddleware(historyHandler))
 
 	fmt.Println("Server running on :8080")
